@@ -29,6 +29,13 @@ logger = logging.getLogger(__name__)
 # ramp-up/ramp-down phases, plus the scaled multiplier.
 _K6_OVERHEAD_SECONDS = 120  # ramp phases + k6 startup/teardown
 
+# k6 only exports the trend statistics named here, and its default set is
+# ['avg', 'min', 'med', 'max', 'p(90)', 'p(95)'] - note the absence of p(99).
+# _parse_k6_summary reads 'p(99)', so without this every run reported a p99 of
+# 0.00ms: a value lower than its own p95, and impossible on its face. The stat
+# names must stay in step with the keys _parse_k6_summary asks for.
+_K6_TREND_STATS = "['avg', 'min', 'med', 'max', 'p(90)', 'p(95)', 'p(99)']"
+
 
 def _build_k6_script(config: dict) -> str:
     """Generate a k6 JavaScript test script from the LoadTest config dict.
@@ -75,6 +82,7 @@ def _build_k6_script(config: dict) -> str:
 
     thresholds_js = json.dumps(k6_thresholds)
     headers_js = json.dumps(headers) if headers else '{}'
+    trend_stats = _K6_TREND_STATS
     
     if scenario == 'spider':
         ramp_up = max(5, duration // 3)
@@ -103,6 +111,7 @@ const errorRate = new Rate('errors');
 export const options = {{
 {options_js}
   thresholds: {thresholds_js},
+  summaryTrendStats: {trend_stats},
 }};
 
 const headers = {headers_js};
@@ -251,6 +260,7 @@ const errorRate = new Rate('errors');
 export const options = {{
 {options_js}
   thresholds: {thresholds_js},
+  summaryTrendStats: {trend_stats},
 }};
 
 const headers = {headers_js};
