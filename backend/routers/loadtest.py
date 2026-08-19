@@ -262,6 +262,9 @@ def get_loadtest_results(
         metrics=metrics,
         timeseries=timeseries,
         breaking_point_vus=lt.breaking_point_vus,
+        # loadtest_orchestrator stores compute_performance_score()'s result on
+        # the scan row (same column a VAPT scan uses for risk_score).
+        performance_score=scan.risk_score,
         thresholds_passed=lt.thresholds_passed,
         ai_analysis=ai_analysis,
         ai_recommendations=ai_recommendations,

@@ -9,7 +9,7 @@ import {
 import {
   getLoadTestStatus, getLoadTestResults, cancelLoadTest,
   type LoadTestStatusResponse, type LoadTestResultsResponse,
-  type LoadTestMetrics, type LoadTestTimeseriesPoint,
+  type LoadTestTimeseriesPoint,
 } from '@/lib/api'
 import { Panel } from '@/components/ui'
 import { cn } from '@/lib/format'
@@ -64,41 +64,57 @@ function MetricCard({ label, value, unit, sub, trend, className }: {
 }
 
 // ── Performance gauge (SVG arc) ─────────────────────────────────────────────
-function PerformanceGauge({ score }: { score: number }) {
+// `score` is the backend's stored value. null means "never computed" (the run
+// failed before producing metrics) and renders as an explicit absence - showing
+// 0 there would claim the target scored the worst possible result, a different
+// and much stronger statement than "we have no number". Bands use the severity
+// tokens so this reads in the same colour language as the scan report's risk
+// ring rather than raw Tailwind greens and reds.
+function PerformanceGauge({ score }: { score: number | null }) {
   const radius = 60
   const circumference = Math.PI * radius  // semi-circle
-  const offset = circumference * (1 - score / 100)
-  const color =
-    score >= 80 ? '#22c55e' :
-    score >= 60 ? '#eab308' :
-    score >= 40 ? '#f97316' : '#ef4444'
+  const has = score !== null
+  const offset = circumference * (1 - (score ?? 0) / 100)
+  const color = !has
+    ? 'var(--color-ink-faint)'
+    : score >= 80
+      ? 'var(--color-cyan)'
+      : score >= 60
+        ? 'var(--color-med)'
+        : score >= 40
+          ? 'var(--color-high)'
+          : 'var(--color-crit)'
 
   return (
     <div className="flex flex-col items-center">
-      <svg viewBox="0 0 140 80" className="w-40">
+      <svg viewBox="0 0 140 80" className="w-40" aria-hidden="true">
         <path
           d="M 10 70 A 60 60 0 0 1 130 70"
           fill="none"
-          stroke="var(--color-line)"
+          stroke="var(--color-raised-2)"
           strokeWidth="10"
           strokeLinecap="round"
         />
-        <path
-          d="M 10 70 A 60 60 0 0 1 130 70"
-          fill="none"
-          stroke={color}
-          strokeWidth="10"
-          strokeLinecap="round"
-          strokeDasharray={circumference}
-          strokeDashoffset={offset}
-          className="transition-all duration-1000 ease-out"
-        />
+        {has && (
+          <path
+            d="M 10 70 A 60 60 0 0 1 130 70"
+            fill="none"
+            stroke={color}
+            strokeWidth="10"
+            strokeLinecap="round"
+            strokeDasharray={circumference}
+            strokeDashoffset={offset}
+            className="transition-all duration-1000 ease-out"
+          />
+        )}
       </svg>
       <div className="-mt-6 text-center">
-        <span className="font-mono text-3xl font-bold" style={{ color }}>{score}</span>
+        <span className="tnum font-mono text-3xl font-bold" style={{ color }}>
+          {has ? score : '--'}
+        </span>
         <span className="text-sm text-ink-dim">/100</span>
       </div>
-      <div className="mt-1 text-xs font-medium text-ink-dim">Performance Score</div>
+      <div className="signage mt-2 text-[10.5px] text-ink-faint">Performance score</div>
     </div>
   )
 }
@@ -257,7 +273,7 @@ export function LoadTestResults({ jobId }: { jobId: string }) {
           <div className="mb-8 grid grid-cols-1 gap-6 lg:grid-cols-3">
             {/* Score gauge */}
             <Panel className="flex items-center justify-center p-6">
-              <PerformanceGauge score={results?.metrics ? computeDisplayScore(results.metrics) : 0} />
+              <PerformanceGauge score={results?.performance_score ?? null} />
             </Panel>
 
             {/* Key metrics grid */}
@@ -473,23 +489,10 @@ function StatusPill({ status }: { status: string }) {
   )
 }
 
-// ── Client-side performance score (mirrors backend's compute_performance_score) ──
-function computeDisplayScore(m: LoadTestMetrics): number {
-  let score = 0
-  // p95 latency (40%)
-  const p95 = m.http_req_duration_p95
-  const latScore = p95 <= 100 ? 100 : p95 <= 200 ? 90 : p95 <= 500 ? 70 : p95 <= 1000 ? 50 : p95 <= 2000 ? 30 : 10
-  score += latScore * 0.4
-  // Error rate (30%)
-  const err = m.http_req_failed_rate
-  const errScore = err <= 0.001 ? 100 : err <= 0.01 ? 80 : err <= 0.05 ? 50 : err <= 0.1 ? 20 : 0
-  score += errScore * 0.3
-  // Consistency (15%)
-  const avg = m.http_req_duration_avg
-  const ratio = avg > 0 && p95 > 0 ? avg / p95 : 0.5
-  const conScore = ratio > 0.8 ? 90 : ratio > 0.6 ? 70 : ratio > 0.4 ? 50 : 20
-  score += conScore * 0.15
-  // Neutral threshold score (15%)
-  score += 50 * 0.15
-  return Math.min(100, Math.max(0, Math.round(score)))
-}
+// A client-side reimplementation of compute_performance_score used to live
+// here. It was necessarily wrong: the browser is never sent the configured
+// pass/fail thresholds, which are 15% of the score, so the copy hardcoded that
+// component to a neutral 50 and silently disagreed with the backend whenever a
+// latency or error budget was set. The score is now read from
+// `results.performance_score`, which is the value the orchestrator computed and
+// stored - one implementation, one number.
