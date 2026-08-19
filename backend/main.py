@@ -6,6 +6,7 @@ from routers.scan import router as scan_router
 from routers.report import router as report_router
 from routers.verify import router as verify_router
 from routers.auth import router as auth_router
+from routers.loadtest import router as loadtest_router
 
 # Refuse to boot with default secrets in a production posture (no-op warning for
 # local self-hosted). Runs at import so uvicorn/gunicorn can't skip it.
@@ -32,3 +33,4 @@ app.include_router(scan_router)
 app.include_router(report_router)
 app.include_router(verify_router)
 app.include_router(auth_router)
+app.include_router(loadtest_router)

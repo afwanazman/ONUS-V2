@@ -20,6 +20,19 @@ class ScanStatus(str, enum.Enum):
     cancelled = "cancelled"
 
 
+class LoadTestStatus(str, enum.Enum):
+    """Load test lifecycle — simpler than VAPT (no multi-module chord, no
+    operator decision pause). 'warmup' is the k6 VU ramp-up phase before
+    steady-state metrics collection begins."""
+    queued = "queued"
+    running = "running"
+    warmup = "warmup"
+    analysing = "analysing"
+    complete = "complete"
+    failed = "failed"
+    cancelled = "cancelled"
+
+
 class User(Base):
     """Hosted-tier user account (routers/auth.py). Only used when
     config.REQUIRE_AUTH is True — local/self-hosted ONUS has no users.
@@ -103,6 +116,60 @@ class Scan(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=True)
 
     report = relationship("Report", back_populates="scan", uselist=False)
+    loadtest = relationship("LoadTest", back_populates="scan", uselist=False)
+
+
+class LoadTest(Base):
+    """Load test configuration and results - linked 1:1 to a Scan row whose
+    job_type='loadtest'. Reuses the Scan's lifecycle (status, started_at,
+    completed_at, created_at) so the scans-list dashboard, stuck-scan reaper,
+    and hosted queue work identically without special-casing.
+
+    Config fields are the k6-scenario parameters the frontend submits;
+    results fields are populated by the loadtest orchestrator after k6 finishes.
+    """
+    __tablename__ = "load_tests"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    scan_id = Column(UUID(as_uuid=True), ForeignKey("scans.id"), nullable=False, unique=True)
+
+    # ── Config (set at creation, immutable after dispatch) ──
+    # Target URL(s) to load-test. Single URL for simple tests; JSON array
+    # for multi-endpoint scenarios.
+    target_urls = Column(JSONB, nullable=False)           # ["https://example.com/api/health"]
+    # k6 scenario type: 'ramp' (gradual VU increase), 'constant' (steady VUs),
+    # 'spike' (sudden burst), 'soak' (long-duration moderate load),
+    # 'stress' (push past breaking point).
+    scenario = Column(String(16), nullable=False, default='ramp')
+    virtual_users = Column(Integer, nullable=False, default=50)
+    duration_seconds = Column(Integer, nullable=False, default=30)
+    # Ramp-up stages (JSON): [{"target": 50, "duration": "10s"}, ...]
+    # Only used by 'ramp'/'stress' scenarios; ignored by 'constant'.
+    ramp_stages = Column(JSONB, nullable=True)
+    # Optional HTTP method override (default GET).
+    http_method = Column(String(8), nullable=False, default='GET')
+    # Optional request headers (JSON dict).
+    headers_config = Column(JSONB, nullable=True)
+    # Optional request body (for POST/PUT).
+    request_body = Column(Text, nullable=True)
+    # Success thresholds: {"http_req_duration_p95": 500, "http_req_failed_rate": 0.01}
+    thresholds = Column(JSONB, nullable=True)
+
+    # ── Results (populated by k6_runner / load_analyzer after execution) ──
+    # Full k6 JSON summary output.
+    k6_summary = Column(JSONB, nullable=True)
+    # Processed metrics: {p50, p95, p99, avg, min, max, rps, error_rate, ...}
+    metrics = Column(JSONB, nullable=True)
+    # AI-generated analysis prose.
+    ai_analysis = Column(JSONB, nullable=True)
+    # Per-second timeseries for frontend charting: [{t, rps, latency_p95, errors}, ...]
+    timeseries = Column(JSONB, nullable=True)
+    # Breaking-point detection: the VU count where latency spiked or errors appeared.
+    breaking_point_vus = Column(Integer, nullable=True)
+    # Whether all user-defined thresholds passed.
+    thresholds_passed = Column(Boolean, nullable=True)
+
+    scan = relationship("Scan", back_populates="loadtest")
 
 
 class Report(Base):

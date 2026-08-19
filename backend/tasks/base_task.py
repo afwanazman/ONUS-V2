@@ -243,6 +243,30 @@ def update_module_status(scan_id: str, module_name: str, status: str) -> None:
         db.close()
 
 
+def update_ai_progress(scan_id: str, progress: int) -> None:
+    """
+    Write the incremental AI analysis progress percentage to the DB.
+    """
+    from database import SessionLocal
+    from sqlalchemy import text
+
+    db = SessionLocal()
+    try:
+        db.execute(
+            text(
+                "UPDATE scans SET module_statuses = "
+                "jsonb_set(coalesce(module_statuses, '{}'::jsonb), ARRAY['ai_progress'], to_jsonb(CAST(:progress AS int))) "
+                "WHERE id = :scan_id"
+            ),
+            {"progress": progress, "scan_id": scan_id},
+        )
+        db.commit()
+    except Exception as e:
+        logger.error("update_ai_progress failed scan=%s: %s", scan_id, e)
+    finally:
+        db.close()
+
+
 def normalize_finding(
     module: str,
     tool: str,

@@ -427,7 +427,8 @@ def _finalize(results: list, scan_id: str, domain: str) -> None:
 
         # --- Step 6: deterministic scoring, then AI description pass ---
         try:
-            ai_result = _score_and_describe(aggregated, domain)
+            ai_result = _score_and_describe(aggregated, domain, scan_id=scan_id, notes=scan.notes)
+            logger.info("AI analysis completed successfully for scan %s", scan_id)
         except Exception as e:
             logger.error("Scoring/analysis failed for scan %s: %s", scan_id, e)
             ai_result = _rule_based_fallback(aggregated)
@@ -503,7 +504,7 @@ def _incomplete_modules_warning(module_execution: list) -> Optional[str]:
     )
 
 
-def _score_and_describe(aggregated: dict, domain: str) -> dict:
+def _score_and_describe(aggregated: dict, domain: str, scan_id: str = None, notes: str = None) -> dict:
     """
     Deterministic scoring (analysis/cvss_scorer.py) followed by an AI
     description pass (analysis/ollama_client.py). Numbers - severity, cvss,
@@ -527,7 +528,7 @@ def _score_and_describe(aggregated: dict, domain: str) -> dict:
 
     risk_score = compute_risk_score(findings)
 
-    ai_result = analyse(findings, domain)
+    ai_result = analyse(findings, domain, scan_id=scan_id, notes=notes)
     descriptions = ai_result.get('descriptions', {})
     for f in findings:
         d = descriptions.get(f.get('finding_id', ''))

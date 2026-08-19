@@ -161,6 +161,13 @@ RUN curl -sL -o /tmp/httpx.zip \
     cd /tmp && unzip -o httpx.zip && mv httpx /usr/local/bin/ && \
     chmod +x /usr/local/bin/httpx && rm httpx.zip
 
+# k6 (Grafana's load testing tool, pinned amd64 binary) - tasks/k6_runner.py
+# executes load test scenarios via subprocess. Single Go binary, no runtime deps.
+RUN curl -sL -o /tmp/k6.tar.gz \
+    https://github.com/grafana/k6/releases/download/v0.54.0/k6-v0.54.0-linux-amd64.tar.gz && \
+    cd /tmp && tar xzf k6.tar.gz && mv k6-v0.54.0-linux-amd64/k6 /usr/local/bin/ && \
+    chmod +x /usr/local/bin/k6 && rm -rf k6.tar.gz k6-v0.54.0-linux-amd64
+
 # ── full (final): fulltools + app code (local dev SCANNER_BACKEND=local) ─────
 FROM fulltools AS full
 COPY backend/ backend/

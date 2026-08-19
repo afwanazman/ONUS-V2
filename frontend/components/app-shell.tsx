@@ -3,7 +3,7 @@
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { useEffect, useState } from 'react'
-import { Activity, FilePlus2, LayoutList, LogOut } from 'lucide-react'
+import { Activity, FilePlus2, Gauge, LayoutList, LogOut } from 'lucide-react'
 import { getAuthProviders, logout } from '@/lib/api'
 import { trackEvent } from '@/lib/analytics'
 
@@ -20,7 +20,6 @@ import { AmbientBackground } from './ambient-background'
 import { CommandPalette } from './command-palette'
 import { OnusMark } from './ui'
 import { cn } from '@/lib/format'
-
 const NAV = [
   // The form moved to /scan/new when '/' became the marketing landing. The
   // match arm was equally stale: '/' renders chrome-free, so a rail item that
@@ -34,13 +33,14 @@ const NAV = [
     icon: Activity,
     match: (p: string) => p.startsWith('/scan/'),
   },
+  { href: '/loadtest/new', label: 'Load Test', icon: Gauge, match: (p: string) => p.startsWith('/loadtest') },
   { href: '/scans', label: 'Scans', icon: LayoutList, match: (p: string) => p.startsWith('/scans') },
 ]
 
 // Routes that render full-bleed, without the operator rail / ambient / grain
 // overlays: the auth screens (own backdrop) and the marketing landing (own
 // sticky nav + footer).
-const AUTH_ROUTES = ['/', '/sign-in', '/sign-up']
+const AUTH_ROUTES = ['/sign-in', '/sign-up']
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname()

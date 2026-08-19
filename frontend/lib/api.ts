@@ -381,3 +381,136 @@ export const issueDomainChallenge = (domain: string, method: 'meta_tag' | 'http_
 
 export const checkDomainChallenge = (verificationId: string) =>
   postJson<DomainCheckResult>(`/api/verify/domain/${verificationId}/check`)
+
+
+// ── Load Testing ────────────────────────────────────────────────────────────
+
+export type LoadTestScenarioType = 'ramp' | 'constant' | 'spike' | 'soak' | 'stress' | 'spider'
+export type LoadTestJobStatus = 'queued' | 'running' | 'warmup' | 'analysing' | 'complete' | 'failed' | 'cancelled'
+
+export interface LoadTestScenarioInfo {
+  id: LoadTestScenarioType
+  label: string
+  description: string
+  icon_hint: string
+}
+
+export interface RampStage {
+  target: number
+  duration: string
+}
+
+export interface LoadTestRequestBody {
+  target_url: string
+  target_urls?: string[]
+  authorized: boolean
+  scenario?: LoadTestScenarioType
+  virtual_users?: number
+  duration_seconds?: number
+  ramp_stages?: RampStage[]
+  http_method?: string
+  headers?: Record<string, string>
+  request_body?: string
+  thresholds?: Record<string, number>
+  notes?: string
+  auth?: AuthConfigWire
+}
+
+export interface LoadTestResponse {
+  job_id: string
+  status: LoadTestJobStatus
+  target_url: string
+}
+
+export interface LoadTestStatusResponse {
+  job_id: string
+  target_url: string
+  status: LoadTestJobStatus
+  progress: number
+  started_at: string | null
+  scenario: string
+  virtual_users: number
+  duration_seconds: number
+  current_rps?: number | null
+  current_latency_p95?: number | null
+  current_error_rate?: number | null
+  current_vus?: number | null
+}
+
+export interface LoadTestMetrics {
+  http_req_duration_avg: number
+  http_req_duration_min: number
+  http_req_duration_max: number
+  http_req_duration_p50: number
+  http_req_duration_p90: number
+  http_req_duration_p95: number
+  http_req_duration_p99: number
+  http_reqs_per_second: number
+  http_req_failed_rate: number
+  total_requests: number
+  total_data_received_mb: number
+  total_data_sent_mb: number
+  vus_max: number
+  iterations: number
+}
+
+export interface LoadTestTimeseriesPoint {
+  t: number
+  rps: number
+  latency_p95: number
+  latency_avg: number
+  errors: number
+  vus: number
+}
+
+export interface LoadTestResultsResponse {
+  job_id: string
+  target_url: string
+  scenario: string
+  status: LoadTestJobStatus
+  metrics: LoadTestMetrics | null
+  timeseries: LoadTestTimeseriesPoint[] | null
+  breaking_point_vus: number | null
+  thresholds_passed: boolean | null
+  ai_analysis: string | null
+  ai_recommendations: string[] | null
+  duration_seconds: number
+  started_at: string | null
+  completed_at: string | null
+}
+
+export async function submitLoadTest(body: LoadTestRequestBody): Promise<LoadTestResponse> {
+  const res = await fetch('/api/loadtest', {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify(body),
+  })
+  if (res.ok) return (await res.json()) as LoadTestResponse
+  let errBody: unknown = {}
+  try { errBody = await res.json() } catch { errBody = {} }
+  const detail = (errBody as { detail?: unknown }).detail ?? (errBody as { message?: unknown }).message
+  const message = typeof detail === 'string' && detail.length > 0 ? detail : `HTTP ${res.status}`
+  throw new ApiError(res.status, message, errBody)
+}
+
+export async function getLoadTestScenarios(): Promise<LoadTestScenarioInfo[]> {
+  const res = await fetch('/api/loadtest/scenarios', { cache: 'no-store' })
+  const data = await handle<{ scenarios: LoadTestScenarioInfo[] }>(res)
+  return data.scenarios ?? []
+}
+
+export async function getLoadTestStatus(id: string): Promise<LoadTestStatusResponse> {
+  const res = await fetch(`/api/loadtest/${id}/status`, { cache: 'no-store' })
+  return handle<LoadTestStatusResponse>(res)
+}
+
+export async function getLoadTestResults(id: string): Promise<LoadTestResultsResponse> {
+  const res = await fetch(`/api/loadtest/${id}/results`, { cache: 'no-store' })
+  return handle<LoadTestResultsResponse>(res)
+}
+
+export async function cancelLoadTest(id: string): Promise<{ status: string }> {
+  const res = await fetch(`/api/loadtest/${id}/cancel`, { method: 'POST' })
+  return handle<{ status: string }>(res)
+}
+

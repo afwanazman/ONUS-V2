@@ -142,6 +142,9 @@ def _compute_progress(scan: Scan) -> int:
         # not a hardcoded 8 - otherwise a quick scan caps at ~37%.
         divisor = len(module_statuses) or len(SCAN_MODULE_IDS)
         return 20 + int((completed / divisor) * 60)
+    elif scan.status == ScanStatus.analysing:
+        ai_pct = module_statuses.get('ai_progress', 0)
+        return 80 + int(ai_pct * 0.19)
     return status_order.get(scan.status, 0)
 
 
@@ -517,7 +520,7 @@ def get_scan_status(scan_id: UUID, http_request: Request, db: Session = Depends(
         status=scan.status.value,
         progress=_compute_progress(scan),
         started_at=scan.started_at,
-        modules=scan.module_statuses or {},
+        modules={k: str(v) for k, v in (scan.module_statuses or {}).items() if k != "ai_progress"},
         module_errors=module_errors,
         can_retry=can_retry,
         queue_position=q_pos,

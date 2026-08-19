@@ -1,7 +1,7 @@
 import logging
 import os
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import weasyprint
 from jinja2 import Environment, FileSystemLoader, select_autoescape
@@ -71,6 +71,9 @@ def generate_pdf(scan, analysis: dict, store_in_db: bool = True) -> bytes:
     scan_date = scan.completed_at or scan.started_at or datetime.now(timezone.utc)
     if scan_date.tzinfo is None:
         scan_date = scan_date.replace(tzinfo=timezone.utc)
+    
+    # Convert to GMT+8
+    scan_date = scan_date.astimezone(timezone(timedelta(hours=8)))
 
     findings = analysis.get('findings', [])
     # Findings catalogue order: confidence tier (confirmed -> probable ->
@@ -102,7 +105,7 @@ def generate_pdf(scan, analysis: dict, store_in_db: bool = True) -> bytes:
     is_quick = getattr(scan, 'scan_type', 'full') == 'quick'
     context = {
         'domain':          scan.domain,
-        'scan_date':       scan_date.strftime('%-d %B %Y, %H:%M IST'),
+        'scan_date':       scan_date.strftime('%-d %B %Y, %H:%M GMT+8'),
         'risk_score':      risk_score,
         # Assessment type + scope disclaimer. A Quick Assessment must never read
         # as a complete VAPT, and absence of passive findings is not proof the

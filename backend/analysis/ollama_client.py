@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from typing import Dict, List, Optional, Tuple
 
 import requests
@@ -8,10 +9,18 @@ from config import settings
 
 logger = logging.getLogger(__name__)
 
-# Descriptive-only prompt (verbatim, do not paraphrase or reorder). Ollama no
+def _clean_json_string(text: str) -> str:
+    text = text.strip()
+    # Extract JSON content between ```json and ``` if present
+    match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
+    if match:
+        return match.group(1).strip()
+    return text
+
+# Descriptive-only prompts (verbatim, do not paraphrase or reorder). Ollama no
 # longer produces severity/cvss/priority/risk_score - those are computed
 # deterministically by analysis/cvss_scorer.py before this module ever runs.
-_SYSTEM_PROMPT = (
+_FINDINGS_SYSTEM_PROMPT = (
     "You are a security writer explaining vulnerability findings to a non-technical\n"
     "audience. You will receive a JSON list of vulnerability findings that have\n"
     "already been scored and categorized by a separate system. Your ONLY job is to\n"
@@ -45,19 +54,8 @@ _SYSTEM_PROMPT = (
     "advice, and reflect the confidence honestly (a 'probable' finding is a "
     "likely-but-unconfirmed signal, not a certainty).\n"
     "\n"
-    "Also produce:\n"
-    "- executive_summary: 3 to 4 sentences overviewing the scan results in plain\n"
-    "  English, suitable for a non-technical stakeholder. Mention the target, the\n"
-    "  general categories of issues found, and the overall security posture in\n"
-    "  qualitative terms. Do NOT invent numbers, counts, or percentages. Base\n"
-    "  the overall posture on the full scan totals provided below, not only on\n"
-    "  the individual findings listed above them - that list may be a small or\n"
-    "  even empty sample of the full scan, so a short list does NOT mean a\n"
-    "  clean scan.\n"
-    "\n"
     "Return valid JSON only, no markdown, no explanation outside the JSON:\n"
     "{\n"
-    '  "executive_summary": "...",\n'
     '  "findings": [\n'
     '    { "finding_id": "...", "description": "...", "remediation": "..." },\n'
     "    ...\n"
@@ -65,8 +63,27 @@ _SYSTEM_PROMPT = (
     "}"
 )
 
-_REQUIRED_KEYS = {'executive_summary', 'findings'}
-_MAX_SENT_TO_AI = 50
+_SUMMARY_SYSTEM_PROMPT = (
+    "You are a security writer explaining vulnerability findings to a non-technical\n"
+    "audience. You will receive overall scan statistics and a subset of the highest\n"
+    "severity findings for context.\n"
+    "\n"
+    "Produce an executive_summary: 3 to 4 sentences overviewing the scan results in plain\n"
+    "English, suitable for a non-technical stakeholder. Mention the target, the\n"
+    "general categories of issues found, and the overall security posture in\n"
+    "qualitative terms. Do NOT invent numbers, counts, or percentages. Base\n"
+    "the overall posture on the full scan totals provided, not only on\n"
+    "the individual findings listed - that list may be a small or\n"
+    "even empty sample of the full scan, so a short list does NOT mean a\n"
+    "clean scan.\n"
+    "\n"
+    "Return valid JSON only, no markdown, no explanation outside the JSON:\n"
+    "{\n"
+    '  "executive_summary": "..."\n'
+    "}"
+)
+
+_BATCH_SIZE = 5
 _JSON_RETRY_ATTEMPTS = 3  # 1 initial attempt + 2 retries, per spec
 _OLLAMA_TIMEOUT = round(240 * settings.SCAN_TIMEOUT_MULTIPLIER)  # docs/ai.md baseline, scaled by SCAN_TIMEOUT_MULTIPLIER
 
@@ -1511,11 +1528,13 @@ def _shape_for_prompt(findings: List[dict], platform: Optional[str] = None) -> L
 def _call_ollama(shaped: List[dict], overflow: int, domain: str,
                   target_profile: Optional[dict] = None,
                   scan_stats: Optional[dict] = None,
-                  platform: Optional[str] = None) -> dict:
+                  platform: Optional[str] = None,
+                  mode: str = 'findings',
+                  notes: Optional[str] = None) -> dict:
     """One HTTP round-trip to Ollama. Raises on any failure - callers handle
-    retry/fallback. Returns the parsed {'executive_summary','findings'} dict."""
+    retry/fallback. Returns the parsed {'executive_summary'} or {'findings'} dict."""
     note = ''
-    if overflow:
+    if overflow and mode == 'findings':
         note = (
             f'NOTE: {overflow} additional lower-severity findings exist and '
             f'are grouped in the appendix; do not describe them individually. '
@@ -1527,14 +1546,24 @@ def _call_ollama(shaped: List[dict], overflow: int, domain: str,
                  f'control it). ')
     if target_profile:
         note += f'Target environment: {json.dumps(target_profile)}. '
-    user_content = f'{note}Analyze these VAPT findings for {domain}: {json.dumps(shaped)}'
-    if scan_stats:
-        user_content += f' Full scan totals: {json.dumps(scan_stats)}.'
+    if notes:
+        note += f'Additional Application Context: {notes}. '
+
+    if mode == 'findings':
+        user_content = f'{note}Analyze these VAPT findings for {domain}: {json.dumps(shaped)}'
+        sys_prompt = _FINDINGS_SYSTEM_PROMPT
+        req_keys = {'findings'}
+    else:
+        user_content = f'{note}Generate an executive summary for {domain} based on these top findings: {json.dumps(shaped)}'
+        if scan_stats:
+            user_content += f' Full scan totals: {json.dumps(scan_stats)}.'
+        sys_prompt = _SUMMARY_SYSTEM_PROMPT
+        req_keys = {'executive_summary'}
 
     # The prompt is identical across providers - only the wire format, endpoint,
     # and response parsing differ. Deterministic scoring/templates are untouched.
     messages = [
-        {'role': 'system', 'content': _SYSTEM_PROMPT},
+        {'role': 'system', 'content': sys_prompt},
         {'role': 'user', 'content': user_content},
     ]
 
@@ -1579,28 +1608,34 @@ def _call_ollama(shaped: List[dict], overflow: int, domain: str,
         resp.raise_for_status()
         content = resp.json()['message']['content']
 
-    result = json.loads(content)
+    try:
+        content = _clean_json_string(content)
+        result = json.loads(content)
+    except json.JSONDecodeError as e:
+        # Extract a 200-character window around the exact syntax error to avoid flooding logs
+        start = max(0, e.pos - 100)
+        end = min(len(content), e.pos + 100)
+        snippet = content[start:end]
+        logger.error("JSON Decode Error. Snippet around error:\n...%s...", snippet)
+        raise
 
-    missing = _REQUIRED_KEYS - set(result.keys())
+    missing = req_keys - set(result.keys())
     if missing:
         raise ValueError(f'Ollama response missing required keys: {missing}')
-    if not isinstance(result.get('findings'), list):
+    if mode == 'findings' and not isinstance(result.get('findings'), list):
         raise ValueError('Ollama response "findings" is not a list')
 
     return result
 
 
-def analyse(findings: List[dict], domain: str) -> dict:
+def analyse(findings: List[dict], domain: str, scan_id: str = None, notes: str = None) -> dict:
     """
     Generate plain-English description/remediation text for already-scored
     findings (severity/cvss/priority/owasp_category must already be set by
     analysis/cvss_scorer.py before this is called - this function never
     computes or overrides those).
 
-    Sends only the top _MAX_SENT_TO_AI findings by priority to keep the
-    prompt within Ollama's context window (the root cause of the original
-    clinkl.in bug: 4658 findings blew past num_ctx=8192 and silently forced
-    every scan onto the rule-based fallback).
+    Processes findings in batches of _BATCH_SIZE to avoid context limits.
 
     Returns:
         {
@@ -1620,9 +1655,7 @@ def analyse(findings: List[dict], domain: str) -> dict:
     # via apply_platform_context - it must never be sent to the model, since the
     # whole point is that generic server-config advice is wrong for it.
     candidates = [f for f in ordered if report_strategy(f, platform) == STRATEGY_AI]
-    top = candidates[:_MAX_SENT_TO_AI]
-    overflow = max(0, len(candidates) - _MAX_SENT_TO_AI)
-    shaped = _shape_for_prompt(top, platform)
+    
     # Built from the FULL findings list, not just `candidates` - the tech
     # stack/WAF signal comes from finding types that are themselves excluded
     # from the AI batch (they have their own templates), so this must run
@@ -1634,63 +1667,138 @@ def analyse(findings: List[dict], domain: str) -> dict:
     scan_stats = _full_scan_stats(findings)
     by_id = {f.get('finding_id'): f for f in findings if f.get('finding_id')}
 
-    last_error: Optional[Exception] = None
+    descriptions = {}
+    any_batch_failed = False
+    
+    # 1. Process finding descriptions in batches
+    for i in range(0, max(1, len(candidates)), _BATCH_SIZE):
+        batch = candidates[i:i + _BATCH_SIZE]
+        if not batch:
+            break
+        
+        shaped = _shape_for_prompt(batch, platform)
+        last_error = None
+        batch_success = False
+        
+        for attempt in range(1, _JSON_RETRY_ATTEMPTS + 1):
+            try:
+                result = _call_ollama(shaped, 0, domain, target_profile, None, platform, mode='findings', notes=notes)
+                for f in result['findings']:
+                    if not isinstance(f, dict):
+                        logger.warning("Ollama returned a non-dict findings item for %s: %r", domain, f)
+                        continue
+                    fid = f.get('finding_id')
+                    if not fid:
+                        continue
+                    remediation = _coerce_to_text(f.get('remediation', ''))
+                    if _looks_vague(remediation):
+                        source = by_id.get(fid, {'owasp_category': f.get('owasp_category', '')})
+                        _, remediation = _generic_remediation(source)
+                    descriptions[fid] = {
+                        'description': _coerce_to_text(f.get('description', '')),
+                        'remediation': remediation,
+                    }
+                batch_success = True
+                break
+                
+            except requests.exceptions.Timeout:
+                logger.warning("Ollama timed out for %s (batch %d) - using fallback", domain, i // _BATCH_SIZE)
+                break
+            except requests.exceptions.ConnectionError:
+                logger.warning("Ollama not reachable for %s (batch %d) - using fallback", domain, i // _BATCH_SIZE)
+                break
+            except (json.JSONDecodeError, KeyError, ValueError) as e:
+                last_error = e
+                logger.warning("Ollama response invalid for %s batch %d (attempt %d/%d): %s",
+                                domain, i // _BATCH_SIZE, attempt, _JSON_RETRY_ATTEMPTS, e)
+                continue
+            except Exception as e:
+                logger.error("Ollama unexpected error for %s batch %d: %s - using fallback", domain, i // _BATCH_SIZE, e)
+                break
+                
+        if not batch_success:
+            if last_error:
+                logger.warning("Ollama gave up after %d attempts for %s batch %d. Fast-failing remaining batches.",
+                                _JSON_RETRY_ATTEMPTS, domain, i // _BATCH_SIZE)
+            any_batch_failed = True
+            
+            # Apply generic fallback to THIS batch AND all remaining batches
+            for f in ordered[i:]:
+                fid = f.get('finding_id')
+                if fid:
+                    description, remediation = _generic_remediation(f)
+                    descriptions[fid] = {'description': description, 'remediation': remediation}
+            
+            break  # Stop processing further batches
+            break  # Stop processing further batches
+
+        if scan_id:
+            try:
+                from tasks.base_task import update_ai_progress
+                total_batches = (len(candidates) + _BATCH_SIZE - 1) // _BATCH_SIZE
+                completed_batches = (i // _BATCH_SIZE) + 1
+                # Save 1 'batch' worth of progress for the executive summary step
+                pct = int((completed_batches / (total_batches + 1)) * 100)
+                update_ai_progress(scan_id, pct)
+            except Exception as e:
+                logger.error("Failed to update ai progress: %s", e)
+
+    logger.info("Ollama description pass complete for %s - %d findings described",
+                domain, len(descriptions))
+
+    # 2. Process executive summary in a single dedicated call
+    summary_candidates = ordered[:50]  # Top 50 highest-priority findings for context
+    summary_shaped = _shape_for_prompt(summary_candidates, platform)
+    
+    executive_summary = ""
+    summary_success = False
+    last_error = None
+    
     for attempt in range(1, _JSON_RETRY_ATTEMPTS + 1):
         try:
-            result = _call_ollama(shaped, overflow, domain, target_profile,
-                                  scan_stats, platform)
-            descriptions = {}
-            for f in result['findings']:
-                if not isinstance(f, dict):
-                    # Malformed item from a 7B model's JSON - skip just this
-                    # one rather than let it discard the whole batch's
-                    # otherwise-successful descriptions (real crash found
-                    # live: 'str' object has no attribute 'get').
-                    logger.warning("Ollama returned a non-dict findings item for %s: %r",
-                                    domain, f)
-                    continue
-                fid = f.get('finding_id')
-                if not fid:
-                    continue
-                remediation = _coerce_to_text(f.get('remediation', ''))
-                if _looks_vague(remediation):
-                    # Strong prompt, not an enforced contract - fall back to
-                    # the deterministic template for just this finding's
-                    # remediation rather than trust an unactionable step.
-                    source = by_id.get(fid, {'owasp_category': f.get('owasp_category', '')})
-                    _, remediation = _generic_remediation(source)
-                descriptions[fid] = {
-                    'description': _coerce_to_text(f.get('description', '')),
-                    'remediation': remediation,
-                }
-            logger.info("Ollama description pass complete for %s - %d/%d findings described",
-                        domain, len(descriptions), len(findings))
-            return _strip_emdashes({
-                'executive_summary': result.get('executive_summary', ''),
-                'descriptions': descriptions,
-                'ai_unavailable': False,
-            })
-
+            result = _call_ollama(summary_shaped, 0, domain, target_profile, scan_stats, platform, mode='summary', notes=notes)
+            executive_summary = _coerce_to_text(result.get('executive_summary', ''))
+            summary_success = True
+            break
         except requests.exceptions.Timeout:
-            logger.warning("Ollama timed out for %s - using rule-based fallback", domain)
-            break  # don't retry a slow/hung Ollama - fail straight to fallback
+            logger.warning("Ollama timed out for summary generation %s - using fallback", domain)
+            break
         except requests.exceptions.ConnectionError:
-            logger.warning("Ollama not reachable for %s - using rule-based fallback", domain)
-            break  # don't retry an unreachable Ollama
+            logger.warning("Ollama not reachable for summary generation %s - using fallback", domain)
+            break
         except (json.JSONDecodeError, KeyError, ValueError) as e:
             last_error = e
-            logger.warning("Ollama response invalid for %s (attempt %d/%d): %s",
+            logger.warning("Ollama summary response invalid for %s (attempt %d/%d): %s",
                             domain, attempt, _JSON_RETRY_ATTEMPTS, e)
-            continue  # malformed JSON from a 7B model is often worth retrying
+            continue
         except Exception as e:
-            logger.error("Ollama unexpected error for %s: %s - using fallback", domain, e)
+            logger.error("Ollama unexpected error for summary %s: %s - using fallback", domain, e)
             break
+            
+    if scan_id:
+        try:
+            from tasks.base_task import update_ai_progress
+            update_ai_progress(scan_id, 100)
+        except Exception:
+            pass
 
-    if last_error:
-        logger.warning("Ollama gave up after %d attempts for %s - using rule-based fallback",
-                        _JSON_RETRY_ATTEMPTS, domain)
+    if not summary_success:
+        if last_error:
+            logger.warning("Ollama summary gave up after %d attempts for %s", _JSON_RETRY_ATTEMPTS, domain)
+        any_batch_failed = True
+        
+        top_titles = [f.get('title', '') for f in findings if f.get('severity') == 'Critical'][:3]
+        summary_parts = [f'Automated VAPT scan of {domain} identified {len(findings)} findings.']
+        if top_titles:
+            summary_parts.append(f'Top issues: {", ".join(top_titles)}.')
+        summary_parts.append('(AI analysis partially/fully unavailable - rule-based descriptions applied.)')
+        executive_summary = ' '.join(summary_parts)
 
-    return _strip_emdashes(_rule_based_fallback(findings, domain))
+    return _strip_emdashes({
+        'executive_summary': executive_summary,
+        'descriptions': descriptions,
+        'ai_unavailable': not (len(descriptions) > 0 or summary_success),
+    })
 
 
 def _rule_based_fallback(findings: List[dict], domain: str) -> dict:

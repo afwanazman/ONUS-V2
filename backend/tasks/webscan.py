@@ -527,12 +527,21 @@ def _run_zap(scan_id: str, domain: str, target_url: str, auth: Optional[dict] = 
         # leaks into later scans on the shared sidecar. Best-effort - a
         # dangling rule is url-scoped to this target anyway, but clean is
         # better. `zap` may be unbound if ZAP never became reachable.
-        if json_auth_rule_desc:
+        if 'zap' in locals():
+            if json_auth_rule_desc:
+                try:
+                    zap.replacer.remove_rule(json_auth_rule_desc)
+                except Exception as e:
+                    logger.warning("Failed to remove ZAP JSON auth rule %s: %s",
+                                   json_auth_rule_desc, e)
             try:
-                zap.replacer.remove_rule(json_auth_rule_desc)
+                # Stop any lingering spider/ascan if they hit the budget limit, 
+                # so the shared daemon doesn't attack the target forever.
+                zap.spider.stop_all()
+                zap.ascan.stop_all()
             except Exception as e:
-                logger.warning("Failed to remove ZAP JSON auth rule %s: %s",
-                               json_auth_rule_desc, e)
+                logger.debug("Failed to stop ZAP scans for %s: %s", scan_id, e)
+                
         _kill_zap(proc)  # no-op when proc is None (remote ZAP mode)
         logger.info("ZAP scan finished for scan %s", scan_id)
 

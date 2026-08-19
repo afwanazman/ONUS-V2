@@ -387,3 +387,137 @@ class ScanListResponse(BaseModel):
     page: int
     page_size: int
     total_pages: int
+
+
+# ── Load Testing schemas (routers/loadtest.py) ──────────────────────────────
+
+class RampStage(BaseModel):
+    """One stage in a k6 ramping-vus scenario: ramp to `target` VUs over
+    `duration` (e.g. '10s', '1m')."""
+    target: int = Field(ge=0, le=1000)
+    duration: str = Field(pattern=r'^\d+[smh]$')  # '10s', '2m', '1h'
+
+
+class LoadTestRequest(BaseModel):
+    """Create a load test job. `target_url` is the primary URL; `target_urls`
+    is for multi-endpoint scenarios. At least one must be provided."""
+    target_url: str
+    target_urls: Optional[List[str]] = None
+    authorized: bool
+    scenario: Literal['ramp', 'constant', 'spike', 'soak', 'stress', 'spider'] = 'ramp'
+    virtual_users: int = Field(default=50, ge=1, le=1000)
+    duration_seconds: int = Field(default=30, ge=5, le=3600)
+    ramp_stages: Optional[List[RampStage]] = None
+    http_method: Literal['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'HEAD', 'OPTIONS'] = 'GET'
+    headers: Optional[Dict[str, str]] = None
+    request_body: Optional[str] = None
+    # Success thresholds — k6 evaluates these; the report marks pass/fail.
+    # Keys: 'http_req_duration_p95' (ms), 'http_req_failed_rate' (0.0–1.0)
+    thresholds: Optional[Dict[str, float]] = None
+    notes: Optional[str] = None
+    auth: Optional[AuthConfig] = None
+
+    @field_validator("target_url")
+    @classmethod
+    def _validate_target_url(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("Target URL cannot be empty")
+        if not v.startswith(("http://", "https://")):
+            raise ValueError("Target URL must start with http:// or https://")
+        return v
+
+    @field_validator("target_urls")
+    @classmethod
+    def _validate_target_urls(cls, v: Optional[List[str]]) -> Optional[List[str]]:
+        if v is None:
+            return None
+        validated = []
+        for url in v:
+            url = url.strip()
+            if not url.startswith(("http://", "https://")):
+                raise ValueError(f"URL must start with http:// or https://: {url}")
+            validated.append(url)
+        return validated if validated else None
+
+
+class LoadTestResponse(BaseModel):
+    job_id: UUID
+    status: str
+    target_url: str
+
+
+class LoadTestStatusResponse(BaseModel):
+    job_id: UUID
+    target_url: str
+    status: str
+    progress: int
+    started_at: Optional[datetime]
+    scenario: str
+    virtual_users: int
+    duration_seconds: int
+    # Live metrics snapshot (updated during the run via Redis, not DB).
+    current_rps: Optional[float] = None
+    current_latency_p95: Optional[float] = None
+    current_error_rate: Optional[float] = None
+    current_vus: Optional[int] = None
+
+    @field_serializer('started_at')
+    def _serialize_started_at(self, dt: Optional[datetime]) -> Optional[str]:
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.isoformat()
+
+
+class LoadTestMetrics(BaseModel):
+    """Processed k6 output metrics."""
+    http_req_duration_avg: float    # ms
+    http_req_duration_min: float
+    http_req_duration_max: float
+    http_req_duration_p50: float
+    http_req_duration_p90: float
+    http_req_duration_p95: float
+    http_req_duration_p99: float
+    http_reqs_per_second: float
+    http_req_failed_rate: float     # 0.0–1.0
+    total_requests: int
+    total_data_received_mb: float
+    total_data_sent_mb: float
+    vus_max: int
+    iterations: int
+
+
+class LoadTestTimeseriesPoint(BaseModel):
+    """One data point in the per-second timeseries for live charting."""
+    t: int                          # seconds since test start
+    rps: float
+    latency_p95: float              # ms
+    latency_avg: float              # ms
+    errors: int
+    vus: int
+
+
+class LoadTestResultsResponse(BaseModel):
+    job_id: UUID
+    target_url: str
+    scenario: str
+    status: str
+    metrics: Optional[LoadTestMetrics] = None
+    timeseries: Optional[List[LoadTestTimeseriesPoint]] = None
+    breaking_point_vus: Optional[int] = None
+    thresholds_passed: Optional[bool] = None
+    ai_analysis: Optional[str] = None              # executive summary prose
+    ai_recommendations: Optional[List[str]] = None  # actionable items
+    duration_seconds: int = 0
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+
+    @field_serializer('started_at', 'completed_at')
+    def _serialize_timestamps(self, dt: Optional[datetime]) -> Optional[str]:
+        if dt is None:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.isoformat()

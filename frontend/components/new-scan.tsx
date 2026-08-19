@@ -80,6 +80,7 @@ export function NewScan() {
   const router = useRouter()
   const [modules, setModules] = useState<ScanModuleInfo[]>([])
   const [domain, setDomain] = useState('')
+  const [notes, setNotes] = useState('')
   const [authorized, setAuthorized] = useState(false)
   const [loading, setLoading] = useState(false)
   const [submitError, setSubmitError] = useState<string | null>(null)
@@ -154,6 +155,7 @@ export function NewScan() {
         domain: domain.trim(),
         authorized: true,
         mode: scanMode,
+        notes: notes.trim() || undefined,
         ...(auth ? { auth } : {}),
       })
       // Anonymous: only the mode (enum), never the domain/target.
@@ -263,6 +265,20 @@ export function NewScan() {
               ? 'Enter a domain (example.com) or a public IPv4 address.'
               : 'Enter the exact host you are authorized to scan.'}
           </p>
+
+          {/* Notes / Application Stack */}
+          <label htmlFor="notes" className="mt-4 mb-2 block text-[12px] font-medium text-ink-dim">
+            Application Stack & Context (Optional)
+          </label>
+          <div className="relative mb-6">
+            <textarea
+              id="notes"
+              value={notes}
+              onChange={(e) => setNotes(e.target.value)}
+              placeholder="e.g., Next.js frontend with Python FastAPI backend..."
+              className="w-full min-h-[80px] resize-y rounded-md border border-line bg-canvas px-3.5 py-3 text-[14px] text-ink placeholder:text-ink-faint focus:border-accent/60 focus:outline-none focus:ring-1 focus:ring-accent/40"
+            />
+          </div>
 
           {/* Scan mode - hosted only. Rendered once we know which tier we are;
               self-hosted shows nothing here and submits mode='full'. */}
