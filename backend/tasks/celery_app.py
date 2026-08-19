@@ -39,6 +39,13 @@ app.conf.update(
     # REMOVE before Step 9 / Docker.
     task_always_eager=False,
     broker_connection_retry_on_startup=True,
+    # Every module defining an @app.task must be listed here: `include` is what
+    # the WORKER imports at boot, and a task the worker never imported is not in
+    # its registry. The API can still enqueue it (routers import the task
+    # directly), so the message reaches Redis fine and the worker then discards
+    # it with "Received unregistered task of type ..." - the job sits at
+    # 'queued' forever with no error surfaced anywhere the operator can see.
+    # tests/test_celery_registry.py fails if a task module is missing from here.
     include=[
         'tasks.recon',
         'tasks.webscan',
@@ -49,5 +56,12 @@ app.conf.update(
         'tasks.nuclei_scan',
         'tasks.enumeration',
         'tasks.scan_orchestrator',
+        # Load testing. loadtest_orchestrator is dispatched by name from
+        # routers/loadtest.py and MUST be registered. k6_runner is called
+        # directly (synchronously) by the orchestrator rather than dispatched,
+        # but is listed because it is a task module - registration is the
+        # contract, not an optimisation.
+        'tasks.k6_runner',
+        'tasks.loadtest_orchestrator',
     ],
 )
