@@ -11,6 +11,7 @@ from models import Scan, ScanStatus
 from schemas import (
     ScanRequest, ScanResponse, ScanStatusResponse, FindingsResponse,
     ScanDecisionRequest, ScanModulesResponse, ScanListResponse, ScanListItem,
+    ScanBulkDeleteRequest, ScanBulkDeleteResponse, ScanDeleteSkipped,
 )
 from tasks.base_task import SCAN_MODULES, SCAN_MODULE_IDS
 from config import settings
@@ -382,6 +383,7 @@ def _to_list_item(scan: Scan) -> ScanListItem:
         job_id=scan.id,
         target=scan.domain,
         status=scan.status.value,
+        scan_type=scan.scan_type,
         created_at=scan.created_at,
         updated_at=scan.updated_at,
         progress=_compute_progress(scan),
@@ -583,6 +585,106 @@ def get_findings(scan_id: UUID, http_request: Request, db: Session = Depends(get
         total_informational=analysis.get("total_informational", 0),
         findings=findings,
     )
+
+
+# Only a job that is no longer being written to may be deleted. A queued /
+# running / analysing scan still has Celery tasks holding its id: base_task.py
+# writes module_statuses by raw SQL and the orchestrator commits into the same
+# row, so dropping it mid-flight leaves workers erroring against a vanished
+# record. 'awaiting_user_decision' is excluded for the same reason - the
+# orchestrator is parked on that scan waiting for an answer, not finished with
+# it. A genuinely hung scan is not stranded by this: _reap_stuck_scans moves it
+# to 'failed' past STUCK_SCAN_DEADLINE, and failed scans are deletable.
+_DELETABLE_STATUSES = (ScanStatus.complete, ScanStatus.failed, ScanStatus.cancelled)
+
+
+def _delete_blocked_reason(scan: Scan) -> Optional[str]:
+    """None if the scan may be deleted, else the operator-facing reason."""
+    if scan.status in _DELETABLE_STATUSES:
+        return None
+    return (
+        f"Job is still {scan.status.value} - cancel or wait for it to finish "
+        f"before deleting."
+    )
+
+
+@router.delete("/scan/{scan_id}", status_code=204)
+def delete_scan(scan_id: UUID, http_request: Request, db: Session = Depends(get_db)):
+    """Permanently delete one job and everything hanging off it (its PDF report
+    row and, for a load test, its load_tests row). Findings are a JSONB column
+    on the scan itself, so they go with it.
+
+    Routed through get_owned_scan_or_404 like every other scan-scoped endpoint,
+    so hosted mode cannot delete another user's scan (and gets the same 404 as a
+    missing one, never confirming it exists).
+    """
+    scan = get_owned_scan_or_404(scan_id, http_request, db)
+
+    blocked = _delete_blocked_reason(scan)
+    if blocked:
+        raise HTTPException(status_code=409, detail=blocked)
+
+    # Read what we want to log BEFORE deleting. With the default
+    # expire_on_commit=True, touching an attribute on a deleted instance after
+    # commit makes SQLAlchemy try to refresh a row that no longer exists.
+    kind, status = scan.scan_type, scan.status.value
+
+    # Relationship cascade (models.py) removes reports/load_tests in the same
+    # transaction; neither FK has a DB-level ON DELETE CASCADE.
+    db.delete(scan)
+    db.commit()
+    logger.info("Deleted scan %s (%s, %s)", scan_id, kind, status)
+    return None
+
+
+@router.post("/scans/delete", response_model=ScanBulkDeleteResponse)
+def bulk_delete_scans(request: ScanBulkDeleteRequest,
+                      http_request: Request, db: Session = Depends(get_db)):
+    """Bulk counterpart of DELETE /api/scan/{id} for the ledger's selection bar.
+
+    POST rather than DELETE-with-a-body: request bodies on DELETE are widely
+    unsupported by proxies and HTTP clients, and this needs to carry a list.
+
+    Partial success is the contract - each id is evaluated on its own and the
+    response says exactly what was removed and what was left alone. One running
+    scan in the selection must not block deleting the other nineteen.
+    """
+    deleted: list[UUID] = []
+    skipped: list[ScanDeleteSkipped] = []
+
+    # De-duplicate while preserving order; a repeated id would otherwise be
+    # reported once as deleted and once as "not found".
+    seen: set[UUID] = set()
+    for job_id in request.job_ids:
+        if job_id in seen:
+            continue
+        seen.add(job_id)
+
+        try:
+            scan = get_owned_scan_or_404(job_id, http_request, db)
+        except HTTPException as exc:
+            # 401 means the caller has no session at all - that is a request
+            # level failure, not a per-item one, so let it propagate.
+            if exc.status_code == 401:
+                raise
+            skipped.append(ScanDeleteSkipped(job_id=job_id, reason="Not found."))
+            continue
+
+        blocked = _delete_blocked_reason(scan)
+        if blocked:
+            skipped.append(ScanDeleteSkipped(job_id=job_id, reason=blocked))
+            continue
+
+        db.delete(scan)
+        deleted.append(job_id)
+
+    # One commit for the whole batch: either every deletable row in this request
+    # goes, or none does and the caller can retry against unchanged state.
+    if deleted:
+        db.commit()
+    logger.info("Bulk delete: removed %d scan(s), skipped %d", len(deleted), len(skipped))
+
+    return ScanBulkDeleteResponse(deleted=deleted, skipped=skipped)
 
 
 @router.get("/health")

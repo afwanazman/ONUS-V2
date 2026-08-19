@@ -356,6 +356,11 @@ class ScanListItem(BaseModel):
     job_id: UUID
     target: str
     status: str
+    # 'full' | 'quick' (VAPT scan) or 'loadtest'. Load tests share the scans
+    # table, so without this the ledger cannot tell the two job kinds apart and
+    # sends every row to the VAPT status/report pages - which a load test has
+    # no data for.
+    scan_type: str
     created_at: datetime
     updated_at: Optional[datetime]
     progress: int
@@ -387,6 +392,26 @@ class ScanListResponse(BaseModel):
     page: int
     page_size: int
     total_pages: int
+
+
+class ScanBulkDeleteRequest(BaseModel):
+    """Bulk delete for the /scans ledger's selection bar. Capped at one page
+    of the listing so a single request can never try to drop the whole table."""
+    job_ids: List[UUID] = Field(min_length=1, max_length=100)
+
+
+class ScanDeleteSkipped(BaseModel):
+    job_id: UUID
+    reason: str
+
+
+class ScanBulkDeleteResponse(BaseModel):
+    """Per-id outcome rather than all-or-nothing: selecting a page and hitting
+    delete should remove everything it legitimately can and say precisely what
+    it left behind, instead of failing the whole batch because one scan is
+    still running."""
+    deleted: List[UUID]
+    skipped: List[ScanDeleteSkipped]
 
 
 # ── Load Testing schemas (routers/loadtest.py) ──────────────────────────────
@@ -507,6 +532,12 @@ class LoadTestResultsResponse(BaseModel):
     metrics: Optional[LoadTestMetrics] = None
     timeseries: Optional[List[LoadTestTimeseriesPoint]] = None
     breaking_point_vus: Optional[int] = None
+    # 0-100, from analysis/load_analyzer.py::compute_performance_score, computed
+    # once by the orchestrator and stored on the scan row. Exposed so the
+    # frontend renders the authoritative number instead of recomputing it: the
+    # client cannot see the configured thresholds, which are 15% of the score,
+    # so any client-side copy is necessarily wrong whenever a budget is set.
+    performance_score: Optional[int] = None
     thresholds_passed: Optional[bool] = None
     ai_analysis: Optional[str] = None              # executive summary prose
     ai_recommendations: Optional[List[str]] = None  # actionable items

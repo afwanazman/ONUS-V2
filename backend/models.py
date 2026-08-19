@@ -115,8 +115,16 @@ class Scan(Base):
     # for the /api/scans listing page's "Last updated" column).
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=True)
 
-    report = relationship("Report", back_populates="scan", uselist=False)
-    loadtest = relationship("LoadTest", back_populates="scan", uselist=False)
+    # delete-orphan so DELETE /api/scan/{id} removes the scan's dependants in
+    # the same transaction. Neither FK carries ON DELETE CASCADE at the DB
+    # level, so without this a scan that ever produced a PDF (or was a load
+    # test) could not be deleted at all - the raw DELETE would violate the
+    # reports.scan_id / load_tests.scan_id constraint. Doing it in the ORM keeps
+    # this migration-free and works against databases created before this fork.
+    report = relationship("Report", back_populates="scan", uselist=False,
+                          cascade="all, delete-orphan")
+    loadtest = relationship("LoadTest", back_populates="scan", uselist=False,
+                            cascade="all, delete-orphan")
 
 
 class LoadTest(Base):

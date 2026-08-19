@@ -24,11 +24,14 @@ from models import ScanStatus
 
 
 def _fake_scan(status=ScanStatus.complete, module_statuses=None, risk_score=42,
-                raw_findings=None, domain="example.com"):
+                raw_findings=None, domain="example.com", scan_type="full"):
     scan = MagicMock()
     scan.id = uuid.uuid4()
     scan.domain = domain
     scan.status = status
+    # Must be a real string: ScanListItem.scan_type is typed `str`, and a bare
+    # MagicMock attribute fails Pydantic validation.
+    scan.scan_type = scan_type
     scan.module_statuses = module_statuses or {}
     scan.risk_score = risk_score
     scan.raw_findings = raw_findings or {}
