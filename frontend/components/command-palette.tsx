@@ -17,7 +17,7 @@ interface Action {
 const STATIC_ACTIONS: Action[] = [
   {
     id: 'new',
-    label: 'New Scan',
+    label: 'VAPT Scan',
     hint: 'Start a new assessment',
     icon: FilePlus2,
     run: (r) => r.push('/scan/new'),
@@ -163,7 +163,7 @@ export function CommandPalette() {
         <div className="flex items-center justify-between border-t border-line px-4 py-2.5 text-ink-faint">
           <span className="flex items-center gap-2">
             <OnusMark className="h-3.5 w-3.5 text-ink-faint" />
-            <span className="text-[11px] font-medium tracking-[0.18em]">ONUS</span>
+            <span className="text-[11px] font-medium tracking-[0.18em]">ONUS-V2</span>
           </span>
           <span className="flex items-center gap-3 font-mono text-[10.5px]">
             <span>↑↓ navigate</span>

@@ -3,17 +3,56 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { useRouter, useSearchParams } from 'next/navigation'
-import { Activity, CircleCheck, CircleX, Plus, RefreshCw, TimerReset } from 'lucide-react'
+import { Activity, CircleAlert, CircleCheck, CircleX, Gauge, Plus, RefreshCw, ShieldCheck, TimerReset, Trash2 } from 'lucide-react'
 import {
+  deleteScans,
   getScanModules,
   getScans,
   type ScanListCounts,
+  type ScanListItem,
   type ScanListResponse,
   type ScanModuleInfo,
 } from '@/lib/api'
 import { cn, formatDateTime } from '@/lib/format'
-import { Panel, ProgressBar, StatusPill } from './ui'
+import { Panel, ProgressBar, Spinner, StatusPill } from './ui'
 import { Plate } from './decor'
+
+// Mirrors _DELETABLE_STATUSES in backend/routers/scan.py. Kept client-side only
+// to disable the button and explain why up front; the backend re-checks and is
+// the authority - a scan can finish between render and click.
+const DELETABLE = ['complete', 'failed', 'cancelled']
+
+// backend/tasks/loadtest_orchestrator.py writes module_statuses {'k6', 'analysis'}.
+const LOADTEST_STAGE_LABELS: Record<string, string> = {
+  k6: 'k6 Generator',
+  analysis: 'Analysing',
+}
+
+function isLoadTest(r: ScanListItem): boolean {
+  return r.scan_type === 'loadtest'
+}
+
+// Two job kinds share this table, and target alone does not distinguish them -
+// the same host can appear as both a scan and a load test. A fixed-width text
+// chip (not just an icon) so the column scans vertically and the distinction
+// survives being read in a hurry or in greyscale.
+function TypeBadge({ scanType }: { scanType: string }) {
+  const lt = scanType === 'loadtest'
+  return (
+    <span
+      title={lt ? 'Load test (k6)' : `VAPT scan (${scanType})`}
+      className={cn(
+        'signage inline-flex w-[46px] shrink-0 items-center justify-center gap-1 rounded-xs border py-[3px] text-[9px]',
+        lt
+          ? 'border-indigo/45 bg-indigo/[0.10] text-indigo'
+          : 'border-accent/45 bg-accent/[0.08] text-accent',
+      )}
+    >
+      {lt ? <Gauge className="h-2.5 w-2.5" strokeWidth={2} /> : <ShieldCheck className="h-2.5 w-2.5" strokeWidth={2} />}
+      {lt ? 'Load' : 'VAPT'}
+    </span>
+  )
+}
 
 const PAGE_SIZE = 20
 const POLL_MS = 12000
@@ -45,6 +84,9 @@ export function ScansList() {
   const [searchInput, setSearchInput] = useState(search)
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [moduleLabels, setModuleLabels] = useState<Record<string, string>>({})
+  const [confirmDelete, setConfirmDelete] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+  const [deleteNotice, setDeleteNotice] = useState<string | null>(null)
 
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const paramsRef = useRef({ status, search, sort, order, page })
@@ -142,6 +184,45 @@ export function ScansList() {
     })
   }
 
+  // How much of the selection is actually deletable. Counted from the rows on
+  // screen, so a selection carried across pages contributes only what is
+  // currently visible - the backend still decides per id.
+  const selectedRows = rows.filter((r) => selected.has(r.job_id))
+  const deletableCount = selectedRows.filter((r) => DELETABLE.includes(r.status)).length
+  const inFlightCount = selectedRows.length - deletableCount
+
+  async function handleDelete() {
+    setDeleting(true)
+    setDeleteNotice(null)
+    try {
+      const res = await deleteScans([...selected])
+      // Drop only what the server actually removed; anything it skipped stays
+      // selected so the reason stays visible against a real row.
+      setSelected((prev) => {
+        const next = new Set(prev)
+        res.deleted.forEach((id) => next.delete(id))
+        return next
+      })
+      setConfirmDelete(false)
+      if (res.skipped.length > 0) {
+        const [first] = res.skipped
+        setDeleteNotice(
+          `Deleted ${res.deleted.length}. Kept ${res.skipped.length}: ${first.reason}`,
+        )
+      } else {
+        setDeleteNotice(`Deleted ${res.deleted.length} job${res.deleted.length === 1 ? '' : 's'}.`)
+      }
+      // If the last row on a page just went, step back rather than landing on
+      // an empty page that looks like a filter mistake.
+      if (res.deleted.length >= rows.length && page > 1) updateUrl({ page: page - 1 })
+      else load(false)
+    } catch (e) {
+      setDeleteNotice(e instanceof Error ? e.message : 'Delete failed.')
+    } finally {
+      setDeleting(false)
+    }
+  }
+
   const statCards = useMemo(
     () => [
       { label: 'Running', value: counts?.running ?? 0, icon: Activity, color: 'var(--color-accent)' },
@@ -233,12 +314,79 @@ export function ScansList() {
         </form>
       </div>
 
-      {/* Selection bar */}
+      {/* Selection bar. Two states: the normal bar with a Delete action, and an
+          inline confirm that replaces it - deletion is irreversible, so it never
+          fires on a single click. */}
       {selected.size > 0 && (
-        <div className="mb-3 flex items-center gap-3 rounded-md border border-accent/30 bg-accent/[0.07] px-3.5 py-2 text-[12.5px] text-accent-soft">
-          <span className="tnum font-mono">{selected.size}</span> selected
-          <button onClick={() => setSelected(new Set())} className="ml-auto text-ink-dim hover:text-ink">
-            Clear
+        confirmDelete ? (
+          <div className="mb-3 flex flex-wrap items-center gap-3 rounded-md border border-crit/40 bg-crit/[0.08] px-3.5 py-2.5 text-[12.5px] text-crit">
+            <CircleAlert className="h-4 w-4 shrink-0" strokeWidth={1.7} />
+            <span>
+              Permanently delete <span className="tnum font-mono font-semibold">{deletableCount}</span>{' '}
+              job{deletableCount === 1 ? '' : 's'} and their reports? This cannot be undone.
+              {inFlightCount > 0 && (
+                <span className="text-ink-dim">
+                  {' '}
+                  {inFlightCount} still running and will be kept.
+                </span>
+              )}
+            </span>
+            <div className="ml-auto flex items-center gap-2">
+              <button
+                onClick={() => setConfirmDelete(false)}
+                disabled={deleting}
+                className="rounded-md border border-line-strong px-3 py-1.5 text-[12px] font-medium text-ink-dim hover:bg-white/[0.03] disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleDelete}
+                disabled={deleting || deletableCount === 0}
+                className="flex items-center gap-1.5 rounded-md bg-crit px-3 py-1.5 text-[12px] font-semibold text-white hover:bg-crit/90 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {deleting ? <Spinner className="h-3.5 w-3.5" /> : <Trash2 className="h-3.5 w-3.5" strokeWidth={1.8} />}
+                {deleting ? 'Deleting…' : 'Delete'}
+              </button>
+            </div>
+          </div>
+        ) : (
+          <div className="mb-3 flex flex-wrap items-center gap-3 rounded-md border border-accent/30 bg-accent/[0.07] px-3.5 py-2 text-[12.5px] text-accent-soft">
+            <span>
+              <span className="tnum font-mono">{selected.size}</span> selected
+              {inFlightCount > 0 && (
+                <span className="text-ink-dim">
+                  {' '}
+                  · {inFlightCount} still running
+                </span>
+              )}
+            </span>
+            <div className="ml-auto flex items-center gap-3">
+              <button
+                onClick={() => setConfirmDelete(true)}
+                disabled={deletableCount === 0}
+                title={
+                  deletableCount === 0
+                    ? 'Nothing selected can be deleted - a job must be complete, failed or cancelled.'
+                    : undefined
+                }
+                className="flex items-center gap-1.5 text-crit hover:text-crit/80 disabled:cursor-not-allowed disabled:text-ink-faint"
+              >
+                <Trash2 className="h-3.5 w-3.5" strokeWidth={1.7} />
+                Delete
+              </button>
+              <button onClick={() => setSelected(new Set())} className="text-ink-dim hover:text-ink">
+                Clear
+              </button>
+            </div>
+          </div>
+        )
+      )}
+
+      {deleteNotice && (
+        <div className="mb-3 flex items-center gap-2 rounded-md border border-line bg-panel px-3.5 py-2 text-[12.5px] text-ink-dim">
+          {deleteNotice}
+          <button onClick={() => setDeleteNotice(null)} className="ml-auto text-ink-faint hover:text-ink">
+            Dismiss
           </button>
         </div>
       )}
@@ -256,7 +404,11 @@ export function ScansList() {
                 <ScanTh label="Status" col="status" sort={sort} order={order} onSort={toggleSort} />
                 <th className="whitespace-nowrap px-4 py-2.5 font-medium">Progress</th>
                 <th className="whitespace-nowrap px-4 py-2.5 font-medium">Current Module</th>
-                <th className="whitespace-nowrap px-4 py-2.5 font-medium">Risk</th>
+                {/* Not "Risk": the column carries scan.risk_score, which for a
+                    load-test row is the performance score - and there higher is
+                    BETTER, the exact inverse of risk. A shared header has to be
+                    the neutral word; each cell says which it is on hover. */}
+                <th className="whitespace-nowrap px-4 py-2.5 font-medium">Score</th>
                 <ScanTh label="Started" col="created_at" sort={sort} order={order} onSort={toggleSort} />
                 <ScanTh label="Last Updated" col="updated_at" sort={sort} order={order} onSort={toggleSort} />
                 <th className="whitespace-nowrap px-4 py-2.5 text-right font-medium">Actions</th>
@@ -290,12 +442,18 @@ export function ScansList() {
               {!loading &&
                 rows.map((r) => {
                   const isComplete = r.status === 'complete'
+                  const lt = isLoadTest(r)
+                  // A load test's stages are k6 + analysis, which are not in the
+                  // scan-module catalogue moduleLabels is built from - without
+                  // this they render as the bare ids 'k6' / 'analysis'.
                   const cm =
                     r.current_module === null
                       ? '-'
                       : r.current_module === 'Analysing'
                         ? 'Analysing'
-                        : moduleLabels[r.current_module] || r.current_module
+                        : lt
+                          ? LOADTEST_STAGE_LABELS[r.current_module] || r.current_module
+                          : moduleLabels[r.current_module] || r.current_module
                   return (
                     <tr key={r.job_id} className="border-b border-line/60 hover:bg-white/[0.02]">
                       <td className="px-4 py-3">
@@ -314,7 +472,12 @@ export function ScansList() {
                           className="accent-[var(--color-accent)]"
                         />
                       </td>
-                      <td className="whitespace-nowrap px-4 py-3 font-mono text-[13px] text-ink">{r.target}</td>
+                      <td className="whitespace-nowrap px-4 py-3">
+                        <span className="flex items-center gap-2.5">
+                          <TypeBadge scanType={r.scan_type} />
+                          <span className="font-mono text-[13px] text-ink">{r.target}</span>
+                        </span>
+                      </td>
                       <td className="px-4 py-3">
                         <StatusPill status={r.status} size="xs" />
                       </td>
@@ -325,17 +488,46 @@ export function ScansList() {
                         </div>
                       </td>
                       <td className="whitespace-nowrap px-4 py-3 text-[12px] text-ink-dim">{cm}</td>
-                      <td className="whitespace-nowrap px-4 py-3 tnum font-mono text-[13px] text-ink-dim">
+                      <td
+                        className="whitespace-nowrap px-4 py-3 tnum font-mono text-[13px] text-ink-dim"
+                        title={
+                          r.overall_score == null
+                            ? undefined
+                            : lt
+                              ? `Performance score ${r.overall_score}/100 - higher is better`
+                              : `Risk score ${r.overall_score}/100 - higher is worse`
+                        }
+                      >
                         {r.overall_score ?? '-'}
                       </td>
                       <td className="whitespace-nowrap px-4 py-3 text-[12px] text-ink-dim">{formatDateTime(r.created_at)}</td>
                       <td className="whitespace-nowrap px-4 py-3 text-[12px] text-ink-dim">{formatDateTime(r.updated_at)}</td>
                       <td className="whitespace-nowrap px-4 py-3 text-right">
                         <div className="flex items-center justify-end gap-2">
-                          <Link href={`/scan/${r.job_id}/status`} className="rounded-md border border-line px-2.5 py-1 text-[11.5px] text-ink-dim hover:border-line-strong hover:text-ink">
+                          <Link
+                            href={lt ? `/loadtest/${r.job_id}/status` : `/scan/${r.job_id}/status`}
+                            className="rounded-md border border-line px-2.5 py-1 text-[11.5px] text-ink-dim hover:border-line-strong hover:text-ink"
+                          >
                             Status
                           </Link>
-                          {isComplete ? (
+                          {/* A load test has no PDF report - its results live on
+                              the same page as its status - so the second action
+                              is Results, pointing back there rather than at
+                              /scan/{id}/report, which would 404 for it. */}
+                          {lt ? (
+                            isComplete ? (
+                              <Link href={`/loadtest/${r.job_id}/status`} className="rounded-md border border-accent/40 px-2.5 py-1 text-[11.5px] text-accent-soft hover:bg-accent/[0.08]">
+                                Results
+                              </Link>
+                            ) : (
+                              <span
+                                title="Available once the load test is complete."
+                                className="cursor-not-allowed rounded-md border border-line px-2.5 py-1 text-[11.5px] text-ink-faint/60"
+                              >
+                                Results
+                              </span>
+                            )
+                          ) : isComplete ? (
                             <Link href={`/scan/${r.job_id}/report`} className="rounded-md border border-accent/40 px-2.5 py-1 text-[11.5px] text-accent-soft hover:bg-accent/[0.08]">
                               Report
                             </Link>

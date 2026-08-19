@@ -3,7 +3,7 @@
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 import { useEffect, useState } from 'react'
-import { Activity, FilePlus2, Gauge, LayoutList, LogOut } from 'lucide-react'
+import { FilePlus2, Gauge, LayoutList, LogOut } from 'lucide-react'
 import { getAuthProviders, logout } from '@/lib/api'
 import { trackEvent } from '@/lib/analytics'
 
@@ -24,15 +24,12 @@ const NAV = [
   // The form moved to /scan/new when '/' became the marketing landing. The
   // match arm was equally stale: '/' renders chrome-free, so a rail item that
   // only highlighted on '/' could never show as active at all.
-  { href: '/scan/new', label: 'New Scan', icon: FilePlus2, match: (p: string) => p === '/scan/new' },
-  // "Scan Status" is a placeholder destination - it resolves to a real status
-  // page for a scan literally named `demo` (preserving the existing quirk).
-  {
-    href: '/scan/demo/status',
-    label: 'Scan Status',
-    icon: Activity,
-    match: (p: string) => p.startsWith('/scan/'),
-  },
+  { href: '/scan/new', label: 'VAPT Scan', icon: FilePlus2, match: (p: string) => p === '/scan/new' },
+  // A "Scan Status" item used to sit here, hardlinked to /scan/demo/status - a
+  // status page for a scan literally named `demo`. Nothing ever creates that
+  // scan, so the item always landed on a page stuck at "Connection lost -
+  // retrying…". Removed rather than repaired: a status page is inherently
+  // per-job, and every job already has a Status link on its ledger row.
   { href: '/loadtest/new', label: 'Load Test', icon: Gauge, match: (p: string) => p.startsWith('/loadtest') },
   { href: '/scans', label: 'Scans', icon: LayoutList, match: (p: string) => p.startsWith('/scans') },
 ]
@@ -88,7 +85,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <Link
             href="/"
             className="flex h-16 shrink-0 items-center gap-3 overflow-hidden px-[19px]"
-            aria-label="ONUS home"
+            aria-label="ONUS-V2 home"
           >
             <span className="relative shrink-0">
               <OnusMark className="onus-breathe h-[26px] w-[26px] text-accent" />
@@ -104,7 +101,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               </span>
             </span>
             <span className="signage whitespace-nowrap text-[13px] font-bold text-ink text-glow-cyan opacity-0 transition-opacity duration-200 group-hover:opacity-100">
-              ONUS
+              ONUS-V2
             </span>
           </Link>
 

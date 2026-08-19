@@ -134,6 +134,10 @@ export interface ScanListItem {
   job_id: string
   target: string
   status: ScanStatus
+  // 'full' | 'quick' for a VAPT scan, 'loadtest' for a k6 run. Load tests share
+  // the scans table, so the ledger needs this to route a row to the right
+  // status/report pages.
+  scan_type: string
   created_at: string
   updated_at: string | null
   progress: number
@@ -257,6 +261,43 @@ export async function getScans(params: ScanListParams = {}): Promise<ScanListRes
 export async function getScanStatus(id: string): Promise<ScanStatusResponse> {
   const res = await fetch(`/api/scan/${id}/status`, { cache: 'no-store' })
   return handle<ScanStatusResponse>(res)
+}
+
+export interface ScanDeleteSkipped {
+  job_id: string
+  reason: string
+}
+
+export interface ScanBulkDeleteResponse {
+  deleted: string[]
+  skipped: ScanDeleteSkipped[]
+}
+
+/** Permanently delete one job and its report / load-test rows. 409 if the job
+ *  is still in flight. */
+export async function deleteScan(id: string): Promise<void> {
+  const res = await fetch(`/api/scan/${id}`, { method: 'DELETE' })
+  // 204 No Content - there is no body to parse, so handle() would choke on it.
+  if (res.ok) return
+  let body: unknown = {}
+  try {
+    body = await res.json()
+  } catch {
+    body = {}
+  }
+  const detail = (body as { detail?: string }).detail
+  throw new ApiError(res.status, detail || `Delete failed (${res.status})`, body)
+}
+
+/** Bulk delete. Partial success is normal: `skipped` explains every id that
+ *  was left in place (still running, or not found). */
+export async function deleteScans(ids: string[]): Promise<ScanBulkDeleteResponse> {
+  const res = await fetch('/api/scans/delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ job_ids: ids }),
+  })
+  return handle<ScanBulkDeleteResponse>(res)
 }
 
 export async function postScanDecision(
@@ -471,6 +512,10 @@ export interface LoadTestResultsResponse {
   metrics: LoadTestMetrics | null
   timeseries: LoadTestTimeseriesPoint[] | null
   breaking_point_vus: number | null
+  // Authoritative 0-100 score from the backend's compute_performance_score.
+  // Never recompute this client-side: 15% of it is the pass/fail threshold
+  // component, and the configured thresholds are not sent to the browser.
+  performance_score: number | null
   thresholds_passed: boolean | null
   ai_analysis: string | null
   ai_recommendations: string[] | null
