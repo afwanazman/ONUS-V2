@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { useRouter, useSearchParams } from 'next/navigation'
-import { Activity, CircleAlert, CircleCheck, CircleX, Gauge, Plus, RefreshCw, ShieldCheck, TimerReset, Trash2 } from 'lucide-react'
+import { Activity, ChevronDown, CircleAlert, CircleCheck, CircleX, Gauge, Plus, RefreshCw, ShieldCheck, TimerReset, Trash2 } from 'lucide-react'
 import {
   deleteScans,
   getScanModules,
@@ -51,6 +51,107 @@ function TypeBadge({ scanType }: { scanType: string }) {
       {lt ? <Gauge className="h-2.5 w-2.5" strokeWidth={2} /> : <ShieldCheck className="h-2.5 w-2.5" strokeWidth={2} />}
       {lt ? 'Load' : 'VAPT'}
     </span>
+  )
+}
+
+// The ledger lists both job kinds, so the primary action has to ask which one
+// rather than assuming VAPT - picking for the user is how you end up on the
+// wrong form and have to back out.
+const NEW_JOB_OPTIONS = [
+  {
+    href: '/scan/new',
+    label: 'VAPT Scan',
+    hint: 'Parallel scanning modules, scored findings',
+    icon: ShieldCheck,
+    tone: 'text-accent',
+    ring: 'border-accent/45 bg-accent/[0.08]',
+  },
+  {
+    href: '/loadtest/new',
+    label: 'Load Test',
+    hint: 'k6 traffic scenarios, performance score',
+    icon: Gauge,
+    tone: 'text-indigo',
+    ring: 'border-indigo/45 bg-indigo/[0.10]',
+  },
+]
+
+function NewJobMenu() {
+  const [open, setOpen] = useState(false)
+  const wrapRef = useRef<HTMLDivElement>(null)
+  const btnRef = useRef<HTMLButtonElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) setOpen(false)
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setOpen(false)
+        btnRef.current?.focus()
+      }
+    }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [open])
+
+  return (
+    <div ref={wrapRef} className="relative">
+      <button
+        ref={btnRef}
+        type="button"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        className="flex items-center gap-2 rounded-md bg-accent px-3.5 py-2 text-[12.5px] font-semibold text-white hover:bg-accent/90"
+      >
+        <Plus className="h-3.5 w-3.5" strokeWidth={2} />
+        New Scan
+        <ChevronDown
+          className={cn('h-3.5 w-3.5 transition-transform', open && 'rotate-180')}
+          strokeWidth={2}
+        />
+      </button>
+      {open && (
+        <div
+          role="menu"
+          aria-label="Start a new job"
+          className="glass absolute right-0 top-full z-50 mt-1.5 w-[268px] rounded-md p-1.5"
+        >
+          {NEW_JOB_OPTIONS.map((o) => {
+            const Icon = o.icon
+            return (
+              <Link
+                key={o.href}
+                href={o.href}
+                role="menuitem"
+                onClick={() => setOpen(false)}
+                className="flex items-start gap-2.5 rounded-[5px] px-2.5 py-2 hover:bg-white/[0.05] focus:bg-white/[0.05] focus:outline-none"
+              >
+                <span
+                  className={cn(
+                    'mt-[1px] flex h-6 w-6 shrink-0 items-center justify-center rounded-xs border',
+                    o.ring,
+                    o.tone,
+                  )}
+                >
+                  <Icon className="h-3.5 w-3.5" strokeWidth={1.8} />
+                </span>
+                <span className="min-w-0">
+                  <span className="block text-[12.5px] font-medium text-ink">{o.label}</span>
+                  <span className="mt-0.5 block text-[11px] leading-snug text-ink-dim">{o.hint}</span>
+                </span>
+              </Link>
+            )
+          })}
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -257,10 +358,7 @@ export function ScansList() {
             <RefreshCw className="h-3.5 w-3.5" strokeWidth={1.7} />
             Refresh
           </button>
-          <Link href="/scan/new" className="flex items-center gap-2 rounded-md bg-accent px-3.5 py-2 text-[12.5px] font-semibold text-white hover:bg-accent/90">
-            <Plus className="h-3.5 w-3.5" strokeWidth={2} />
-            New Scan
-          </Link>
+          <NewJobMenu />
         </div>
       </div>
 
